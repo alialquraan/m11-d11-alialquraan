@@ -1,75 +1,192 @@
 """Toy FastAPI service for the Module 11 Core Skills Drill.
 
-Two endpoints (POST /echo, GET /sum) on an in-memory app. Your job:
-
-  1. Declare three Prometheus metrics at module scope (requests_total,
-     request_latency_seconds, inflight_requests).
-  2. Implement three ASGI middlewares (RequestId, StructuredLogging, Metrics)
-     and add them to the app in the correct order.
-  3. Mount /metrics via prometheus_client.make_asgi_app().
-
-The published Drill page is the canonical task list. The autograder verifies
-the metrics surface, header behavior, and a JSON log line is emitted.
+Two endpoints (POST /echo, GET /sum) on an in-memory app.
 """
+
+import contextvars
+import json
+import logging
+import time
+import uuid
 
 from fastapi import FastAPI
 from pydantic import BaseModel
-
-# TODO: import Counter, Gauge, Histogram, make_asgi_app from prometheus_client.
-
-# TODO: import uuid, json, logging, time, contextvars as you need them.
-
-
-# TODO: declare requests_total Counter (labels: path, status) at module scope.
-# TODO: declare request_latency_seconds Histogram at module scope.
-#       Labels: ["path"]. Use this explicit bucket sequence
-#       (do NOT use prometheus_client.Histogram's DEFAULT_BUCKETS --
-#       the published Drill guide pins these exact values):
-#         buckets=[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
-# TODO: declare inflight_requests Gauge (no labels) at module scope.
+from prometheus_client import (
+    Counter,
+    Gauge,
+    Histogram,
+    make_asgi_app,
+)
+from starlette.middleware.base import BaseHTTPMiddleware
 
 
-# TODO: declare a module-level ContextVar named request_id_var (default "").
+# ---------------------------------------------------------------------------
+# Prometheus Metrics
+# ---------------------------------------------------------------------------
+
+requests_total = Counter(
+    "requests_total",
+    "Total HTTP requests",
+    ["path", "status"],
+)
+
+request_latency_seconds = Histogram(
+    "request_latency_seconds",
+    "Request latency in seconds",
+    ["path"],
+    buckets=[
+        0.005,
+        0.01,
+        0.025,
+        0.05,
+        0.1,
+        0.25,
+        0.5,
+        1,
+        2.5,
+        5,
+        10,
+    ],
+)
+
+inflight_requests = Gauge(
+    "inflight_requests",
+    "In-flight requests",
+)
 
 
-# TODO: implement RequestIdMiddleware.
-#   - On entry: generate uuid4().hex and store it in request_id_var.
-#   - On response: set the X-Request-ID header.
+# ---------------------------------------------------------------------------
+# Context Variable
+# ---------------------------------------------------------------------------
+
+request_id_var = contextvars.ContextVar(
+    "request_id",
+    default="",
+)
 
 
-# TODO: implement StructuredLoggingMiddleware.
-#   - Time the request.
-#   - Emit one JSON line at INFO level via the logging module with keys:
-#     ts, level, request_id, path, status, latency_ms.
-#   - Do NOT use print(...).
+# ---------------------------------------------------------------------------
+# Middlewares
+# ---------------------------------------------------------------------------
+
+class RequestIdMiddleware(BaseHTTPMiddleware):
+
+    async def dispatch(self, request, call_next):
+        request_id = uuid.uuid4().hex
+
+        request_id_var.set(request_id)
+
+        response = await call_next(request)
+
+        response.headers["X-Request-ID"] = request_id
+
+        return response
 
 
-# TODO: implement MetricsMiddleware.
-#   - On entry: increment inflight_requests.
-#   - Time the handler.
-#   - On exit (try/finally): decrement inflight_requests, increment
-#     requests_total.labels(path=..., status=...).inc(),
-#     call request_latency_seconds.labels(path=...).observe(elapsed).
+class StructuredLoggingMiddleware(BaseHTTPMiddleware):
 
+    async def dispatch(self, request, call_next):
+        start = time.perf_counter()
+
+        response = await call_next(request)
+
+        latency_ms = (time.perf_counter() - start) * 1000
+
+        log = {
+            "ts": time.time(),
+            "level": "INFO",
+            "request_id": request_id_var.get(),
+            "path": request.url.path,
+            "status": response.status_code,
+            "latency_ms": latency_ms,
+        }
+
+        logging.getLogger("app").info(json.dumps(log))
+
+        return response
+
+
+class MetricsMiddleware:
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+
+        # نتحقق هنا إذا كان الطلب ليس HTTP أو كان موجهاً لمسار يبدأ بـ /metrics
+        if scope["type"] != "http" or scope.get("path", "").startswith("/metrics"):
+            await self.app(scope, receive, send)
+            return
+
+        inflight_requests.inc()
+
+        start = time.perf_counter()
+
+        status_code = None
+
+        async def send_wrapper(message):
+
+            nonlocal status_code
+
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+
+        finally:
+            inflight_requests.dec()
+
+            elapsed = time.perf_counter() - start
+
+            if status_code is not None:
+
+                requests_total.labels(
+                    path=scope["path"],
+                    status=str(status_code),
+                ).inc()
+
+                request_latency_seconds.labels(
+                    path=scope["path"],
+                ).observe(elapsed)
+
+
+# ---------------------------------------------------------------------------
+# FastAPI App
+# ---------------------------------------------------------------------------
+
+app = FastAPI(title="M11 Drill — Toy FastAPI Service")
+
+
+# Order matters:
+# Metrics -> Logging -> RequestId
+# (Last added middleware runs first)
+
+app.add_middleware(RequestIdMiddleware)
+app.add_middleware(StructuredLoggingMiddleware)
+app.add_middleware(MetricsMiddleware)
+
+
+# ---------------------------------------------------------------------------
+# Prometheus Endpoint
+# ---------------------------------------------------------------------------
+
+app.mount("/metrics", make_asgi_app())
+
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
 
 class EchoRequest(BaseModel):
     message: str
 
 
-app = FastAPI(title="M11 Drill — Toy FastAPI Service")
-
-
-# TODO: wire the three middlewares onto `app` in the correct order.
-#       Last add_middleware is outermost (request-id outer, metrics inner).
-
-
-# TODO: mount /metrics on `app` using make_asgi_app().
-
-
 # ---------------------------------------------------------------------------
-# Endpoints (do not modify — these are what the autograder hits with traffic).
+# Endpoints
 # ---------------------------------------------------------------------------
-
 
 @app.post("/echo")
 def echo(req: EchoRequest):
