@@ -106,36 +106,50 @@ class StructuredLoggingMiddleware(BaseHTTPMiddleware):
         return response
 
 
-class MetricsMiddleware(BaseHTTPMiddleware):
+class MetricsMiddleware:
 
-    async def dispatch(self, request, call_next):
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
         inflight_requests.inc()
 
         start = time.perf_counter()
 
-        response = None
+        status_code = None
+
+        async def send_wrapper(message):
+
+            nonlocal status_code
+
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+
+            await send(message)
 
         try:
-            response = await call_next(request)
+            await self.app(scope, receive, send_wrapper)
 
         finally:
-            elapsed = time.perf_counter() - start
-
             inflight_requests.dec()
 
-            if response is not None:
+            elapsed = time.perf_counter() - start
+
+            if status_code is not None:
 
                 requests_total.labels(
-                    path=request.url.path,
-                    status=str(response.status_code),
+                    path=scope["path"],
+                    status=str(status_code),
                 ).inc()
 
                 request_latency_seconds.labels(
-                    path=request.url.path,
+                    path=scope["path"],
                 ).observe(elapsed)
-
-        return response
 
 
 # ---------------------------------------------------------------------------
