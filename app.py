@@ -109,11 +109,10 @@ class StructuredLoggingMiddleware(BaseHTTPMiddleware):
 class MetricsMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request, call_next):
+
         inflight_requests.inc()
 
         start = time.perf_counter()
-
-        response = None
 
         try:
             response = await call_next(request)
@@ -124,7 +123,8 @@ class MetricsMiddleware(BaseHTTPMiddleware):
 
             inflight_requests.dec()
 
-            if response is not None:
+            if "response" in locals() and response is not None:
+
                 requests_total.labels(
                     path=request.url.path,
                     status=str(response.status_code),
@@ -146,9 +146,9 @@ app = FastAPI(title="M11 Drill — Toy FastAPI Service")
 # Metrics -> Logging -> RequestId
 # (Last added middleware runs first)
 
-app.add_middleware(MetricsMiddleware)
-app.add_middleware(StructuredLoggingMiddleware)
 app.add_middleware(RequestIdMiddleware)
+app.add_middleware(StructuredLoggingMiddleware)
+app.add_middleware(MetricsMiddleware)
 
 
 # ---------------------------------------------------------------------------
