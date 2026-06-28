@@ -113,7 +113,8 @@ class MetricsMiddleware:
 
     async def __call__(self, scope, receive, send):
 
-        if scope["type"] != "http":
+        # استثناء الطلبات التي ليست HTTP أو الطلبات الموجهة لمسار المقاييس
+        if scope["type"] != "http" or scope.get("path") == "/metrics":
             await self.app(scope, receive, send)
             return
 
