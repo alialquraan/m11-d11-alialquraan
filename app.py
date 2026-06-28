@@ -114,16 +114,17 @@ class MetricsMiddleware(BaseHTTPMiddleware):
 
         start = time.perf_counter()
 
+        response = None
+
         try:
             response = await call_next(request)
-            return response
 
         finally:
             elapsed = time.perf_counter() - start
 
             inflight_requests.dec()
 
-            if "response" in locals() and response is not None:
+            if response is not None:
 
                 requests_total.labels(
                     path=request.url.path,
@@ -133,6 +134,8 @@ class MetricsMiddleware(BaseHTTPMiddleware):
                 request_latency_seconds.labels(
                     path=request.url.path,
                 ).observe(elapsed)
+
+        return response
 
 
 # ---------------------------------------------------------------------------
